@@ -26,6 +26,7 @@ import numpy as np
 import torch
 import torch.utils.data
 import transformers
+import bitsandbytes as bnb
 from datasets import Dataset, IterableDataset
 from packaging import version
 from transformers import (
@@ -37,6 +38,7 @@ from transformers import (
     GenerationConfig,
     PreTrainedModel,
     PreTrainedTokenizerBase,
+    BitsAndBytesConfig,
 
     Trainer,
     TrainerCallback,
@@ -190,15 +192,27 @@ class JanusT2IR1Trainer(Trainer):
             #     model_init_kwargs["torch_dtype"] = torch_dtype
             # else:
             #     raise ValueError(
-            #         "Invalid `torch_dtype` passed to `GRPOConfig`. Expected either 'auto' or a string representing "
-            #         f"a `torch.dtype` (e.g., 'float32'), but got {torch_dtype}."
+            #     "Invalid `torch_dtype` passed to `GRPOConfig`. Expected either 'auto' or a string representing "
+            #     f"a `torch.dtype` (e.g., 'float32'), but got {torch_dtype}."
             #     )
             # # Disable caching if gradient checkpointing is enabled (not supported)
             # model_init_kwargs["use_cache"] = (
             #     False if args.gradient_checkpointing else model_init_kwargs.get("use_cache")
             # )
+            
+            # Configure 4-bit quantization
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            )
+            
             model = AutoModelForCausalLM.from_pretrained(
-                model_id, trust_remote_code=True, torch_dtype=torch.bfloat16
+                model_id,
+                trust_remote_code=True,
+                torch_dtype=torch.bfloat16,
+                quantization_config=quantization_config
             )
         else:
             model_id = model.config._name_or_path
@@ -224,8 +238,15 @@ class JanusT2IR1Trainer(Trainer):
 
         # Reference model
         if is_deepspeed_zero3_enabled() and args.beta != 0:
+            # Also use 4-bit quantization for the reference model
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            )
             self.ref_model = AutoModelForCausalLM.from_pretrained(
-                model_id, trust_remote_code=True
+                model_id, trust_remote_code=True, quantization_config=quantization_config
             )
         elif peft_config is None and args.beta != 0:
             # If PEFT configuration is not provided, create a reference model based on the initial model.
@@ -252,8 +273,18 @@ class JanusT2IR1Trainer(Trainer):
             elif isinstance(reward_func, str) and 'orm' in reward_func:
                 reward_funcs[i] = ORM(args)
             else:
+                # Configure 4-bit quantization for reward models too
+                reward_quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                )
                 reward_funcs[i] = AutoModelForSequenceClassification.from_pretrained(
-                    reward_func, num_labels=1, **model_init_kwargs
+                    reward_func,
+                    num_labels=1,
+                    quantization_config=reward_quantization_config,
+                    **model_init_kwargs
                 )
         self.reward_funcs = reward_funcs
 
